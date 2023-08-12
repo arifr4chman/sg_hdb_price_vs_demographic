@@ -1,5 +1,5 @@
 # Team-53
- Team 53's group project GitHub repository for MGT 6203 (Canvas) Summer of 2023 semester.
+ Team 53's group project GitHub repository for MGT 6203 (Canvas) Summer of 2023 semester in Georgia Tech.
  Here are some explanations of folders inside the repository.
  
   Data folder:
