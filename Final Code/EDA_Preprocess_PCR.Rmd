@@ -1,0 +1,373 @@
+---
+title: "Data Prep"
+author: "Jin Yao"
+date: "2023-07-04"
+output: html_document
+---
+
+```{r}
+
+```
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import Data
+
+```{r}
+Data <- read.csv('Final HDB price2.csv')
+# Check the dimension of Data
+dim(Data)
+```
+
+## Missing Data Inspection
+
+```{r}
+# Get the total number of missing data
+missing_values <- colSums(is.na(Data))
+missing_percentage <- (missing_values / nrow(Data)) * 100
+columns_with_missing <- names(missing_percentage[missing_percentage > 0])
+columns_with_missing
+```
+
+The issue is that we do not have 2023 population data for Singapore as this is concluded at the end of the year. Since population effect on HDB price is at the interest of our study, we shall not attempt to impute but to cut off our modelling period to 2022
+
+### Remove missing population row
+
+```{r}
+# Remove rows with missing values
+Data_clean <- na.omit(Data)
+# Missing value final check
+missing_values_final <- colSums(is.na(Data_clean))
+# Check
+missing_percentage_final <- (missing_values_final / nrow(Data_clean)) * 100
+columns_with_missing_final <- names(missing_percentage_final[missing_percentage_final > 0])
+columns_with_missing_final
+```
+
+## Perform scaling
+
+```{r}
+library(dplyr)
+# Select columns
+Dataset <- data.frame(select(Data_clean,date,price,town,flat_type,floor_area_sqm,storey_range,remaining_lease,children,adult,senior_citizen,total_population))
+head(Dataset)
+```
+
+### Perform dummy variable creation
+
+```{r}
+# Perform dummy variable creation for town,storey range and flat type
+#install.packages('fastDummies')
+library('fastDummies')
+Dataset1 <- dummy_cols(Dataset,select_columns = c('town', 'flat_type','storey_range'))
+```
+
+```{r}
+# Unselect the town, flat_type,storey_range
+Dataset1 <- subset(Dataset1, select = -c(town, flat_type, storey_range))
+# Select columns to change to numeric 
+selected_columns <- c("price","floor_area_sqm","remaining_lease")
+#Convert selected columns to numeric
+Dataset1 <- Dataset1 %>% mutate(across(all_of(selected_columns), as.numeric))
+head(Dataset1)
+```
+
+### Perform scaling
+
+Scaling is necessary when variables in a dataset have different magnitudes because it ensures that each variable has an equal contribution to the analysis or model. By applying scaling, we adjust the variables to a common scale, eliminating the dominance of variables with larger magnitudes. This allows us to compare and interpret the variables more accurately and ensure that they have a balanced impact on the response variable or any subsequent analysis performed.
+
+```{r}
+# Set the CRAN mirror
+options(repos = "https://cran.rstudio.com")
+
+# Install the "caret" package
+library(caret)
+# Select columns to be scaled
+scaled_columns <- c("floor_area_sqm", "remaining_lease", "children","adult","senior_citizen","total_population")
+
+# Apply min-max scaling using preProcess()
+preprocessed_data <- preProcess(Dataset1[, scaled_columns], method = "range")
+
+# Transform the selected columns using the computed scaling parameters
+scaled_data <- predict(preprocessed_data, newdata = Dataset1[, scaled_columns])
+```
+
+```{r}
+# Join the scaled data back to the original Dataset1
+# Remove columns from Dataset1
+Dataset1 <- subset(Dataset1, select = -c(floor_area_sqm, remaining_lease, children, adult, senior_citizen,date,total_population))
+Dataset1 <- cbind(Dataset1[,], scaled_data)
+```
+
+```{r}
+# Create boxplots for all columns except "date" and "price_adj_sqm"
+boxplot(subset(Dataset1, select = c(remaining_lease, floor_area_sqm)))
+boxplot(subset(Dataset1, select = c(price)))
+```
+
+## Perform Pearson Correlation Matrix
+
+```{r}
+# Select numerical variables
+Collinear_dataset <- subset(Dataset1)
+# Make all as numeric
+# Convert columns to numeric
+Collinear_dataset$price <- as.numeric(Collinear_dataset$price)
+Collinear_dataset$floor_area_sqm <- as.numeric(Collinear_dataset$floor_area_sqm)
+Collinear_dataset$remaining_lease <- as.numeric(Collinear_dataset$remaining_lease)
+Collinear_dataset$children <- as.numeric(Collinear_dataset$children)
+Collinear_dataset$adult <- as.numeric(Collinear_dataset$adult)
+Collinear_dataset$senior_citizen <- as.numeric(Collinear_dataset$senior_citizen)
+library("car")
+library("ggplot2")
+library("reshape2")
+
+# Calculate the correlation matrix
+cor_matrix <- cor(Collinear_dataset)
+
+# Get the lower triangle of the correlation matrix
+lower_tri <- cor_matrix
+lower_tri[upper.tri(cor_matrix)] <- NA
+
+# Melt the lower triangle correlation matrix
+melted_cor <- melt(lower_tri, na.rm = TRUE)
+
+# Create a ggplot for the correlation heatmap
+ggplot(melted_cor, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                       midpoint = 0, limit = c(-1, 1),
+                       space = "Lab", name = "Pearson\nCorrelation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 8, hjust = 1)) +
+  coord_fixed() +
+  labs(x = NULL, y = NULL) +
+  guides(fill = guide_colorbar(barwidth = 1, barheight = 4,
+                               title.position = "top", title.hjust = 0)) +
+  geom_text(aes(label = round(value, 2)), color = "black", size = 2)
+
+
+```
+
+The result of the correlation matrix can be interpreted as follow: 
+
+-   The higher the value, the most positively correlated the two variables are.
+
+-   The closer the value to -1, the most negatively correlated they are.
+
+If variables with VIF higher than 5 means these variables are highly collinear. The counter proposal will be to sum up all the group and use as total population.
+
+## Perform Testing,Training and Validation data split then perform modelling with multiple linear regression without PCR
+
+```{r}
+# Unselect children, adult,senior citizen
+#Dataset1 <- subset(Dataset1,select = -c(children,adult,senior_citizen))
+# Set seed for reproducibility
+set.seed(123)
+
+# Split data into training, testing, and validation sets
+train_indices <- sample(1:nrow(Dataset1), 0.7 * nrow(Dataset1))  # 70% for training
+test_indices <- sample(setdiff(1:nrow(Dataset1), train_indices), 0.15 * nrow(Dataset1))  # 15% for testing
+valid_indices <- setdiff(1:nrow(Dataset1), c(train_indices, test_indices))  # Remaining for validation
+
+train_data <- Dataset1[train_indices, ]
+test_data <- Dataset1[test_indices, ]
+valid_data <- Dataset1[valid_indices, ]
+
+# Fit the multiple linear regression model
+model <- lm(price ~ ., data = train_data)
+
+# Print the model summary
+summary(model)
+
+# Predict on the testing data
+test_predictions <- predict(model, newdata = test_data)
+
+# Predict on the validation data
+valid_predictions <- predict(model, newdata = valid_data)
+
+# Calculate the Mean Squared Error (MSE) on the testing data
+mse_test <- mean((test_predictions - test_data$price_adj_sqm)^2)
+cat("MSE on testing data:", mse_test, "\n")
+
+# Calculate the Mean Squared Error (MSE) on the validation data
+mse_valid <- mean((valid_predictions - valid_data$price_adj_sqm)^2)
+cat("MSE on validation data:", mse_valid, "\n")
+
+# Calculate R-squared for the testing data
+r2_test <- 1 - mean((test_data$price - test_predictions)^2) / var(test_data$price)
+cat("R-squared for the testing data:", r2_test, "\n")
+
+# Calculate R-squared for the validation data
+r2_valid <- 1 - mean((valid_data$price - valid_predictions)^2) / var(valid_data$price)
+cat("R-squared for the validation data:", r2_valid, "\n")
+```
+
+## Perform PCA
+
+```{r}
+
+# Perform PCA using the final collinearity data
+PCA_Dataset <- subset(Dataset1, select= -c(total_population))
+# Identify non-numeric columns
+non_numeric_cols <- sapply(train_data, function(x) !is.numeric(x))
+
+# Convert non-numeric columns to numeric format
+train_data[non_numeric_cols] <- lapply(train_data[non_numeric_cols], as.numeric)
+
+# Remove observations with missing values
+train_data <- na.omit(train_data)
+
+# PCA_data
+pca_data <- subset(train_data,select=-c(price))
+
+# Perform PCA using the final collinearity data
+cor_pca <- cor(pca_data)
+data.pca <- princomp(cor_pca)
+summary(data.pca)
+```
+
+```{r}
+library('FactoMineR')
+library('factoextra')
+variance_plot <- fviz_eig(data.pca, addlabels = TRUE, ylim = c(0, 19), barfill = "lightblue", ncp = 57) +
+  theme(panel.background = element_rect(fill = "white"),
+        axis.text = element_text(size = 4))
+
+# Set the plot size and margins
+variance_plot <- variance_plot + theme(plot.margin = unit(c(50, 50, 50, 50), "pt"))
+
+
+# Save a copy of the plot
+ggsave("variance_plot.png", variance_plot, width = 10, height = 10, dpi = 300)
+
+variance_plot
+```
+
+```{r}
+# Method 1: direct from prcomp output
+pca <- prcomp(pca_data, scale. = TRUE)
+# Method 1: direct from prcomp output
+PCs <- pca$x[,1:11]
+PCA_DATA_TRAIN <- cbind(train_data$price,PCs)
+as.data.frame(PCA_DATA_TRAIN)
+model_PCR <- lm(V1~., data = as.data.frame(PCA_DATA_TRAIN))
+beta0 <- model_PCR$coefficients[1]
+betas <- model_PCR$coefficients[2:12]
+# Predict on the testing data
+non_numeric_cols <- sapply(test_data, function(x) !is.numeric(x))
+
+```
+
+betas
+
+```{r}
+summary(model_PCR)
+```
+
+```{r}
+
+# Select the desired number of components
+num_components <- 38  # Choose the desired number of components
+selected_components <- pca$x[, 1:num_components]
+# Get the loadings
+loadings <- pca$rotation
+
+# Extract loadings for selected components
+selected_loadings <- loadings[, 1:num_components]
+
+# Get the absolute values of the loadings
+abs_loadings <- abs(selected_loadings)
+
+# Find the most important features based on the maximum absolute loading for each component
+important_features <- apply(abs_loadings, 2, which.max)
+
+# Get the column names of the original dataset
+original_feature_names <- colnames(Dataset1)
+
+# Map the important feature indices to their corresponding feature names
+important_feature_names <- original_feature_names[important_features]
+
+# Print the important feature names
+print(important_feature_names)
+
+
+```
+
+## PCR
+
+I am using Principle component regression to compare to normal regression
+
+```{r}
+#install.packages('pls')
+library(pls)
+# Perform PCR
+pcr_model <- pcr(price ~ ., data = train_data, scale = TRUE)
+```
+
+```{r}
+# Calculate R-squared for the PCR model on the testing data
+r_squared_test <- R2(pcr_model, data = test_data, format = "traditional")
+r_squared_test
+
+# Calculate R-squared for the PCR model on the validation data
+r_squared_valid <- R2(pcr_model, data = valid_data, format = "traditional")
+r_squared_valid
+```
+
+```{r}
+summary(pcr_model)
+```
+
+## Choosing the number of appropriate PC.
+
+```{r}
+# RMSEP selection 
+validationplot(pcr_model,val.type="RMSEP", cex.axis=0.7)
+axis(side = 1, at = c(40), cex.axis=0.7)
+abline(v = 25, col = "blue", lty = 3)
+```
+
+```{r}
+validationplot(pcr_model, val.type="MSEP", cex.axis=0.7)
+axis(side = 1, at = c(8), cex.axis=0.7)
+abline(v = 25, col = "blue", lty = 3)
+```
+
+```{r}
+validationplot(pcr_model, val.type="R2", cex.axis=0.7)
+axis(side = 1, at = c(38), cex.axis=0.7)
+abline(v = 25, col = "blue", lty = 3)
+```
+
+## Extract top 25 feature
+
+```{r}
+pcr_model_25 <- pcr(price ~ ., data = test_data, scale = TRUE, ncomp = 25)
+
+# Get the R-squared value
+r_squared <- R2(pcr_model_25)
+r_squared
+```
+
+## Export Dataset1
+
+```{r}
+
+# Export test_data
+write.csv(test_data, file = "test_data.csv", row.names = FALSE)
+
+# Export train_data
+write.csv(train_data, file = "train_data.csv", row.names = FALSE)
+
+# Export valid_data
+write.csv(valid_data, file = "valid_data.csv", row.names = FALSE)
+
+
+```

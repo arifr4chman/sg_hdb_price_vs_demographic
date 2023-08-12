@@ -1,0 +1,650 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r}
+# install library packages
+library(arrow)
+library(lubridate)
+library(ggplot2)
+library(rgdal)
+library(sf)
+library(dplyr)
+library(corrplot)
+library(car)
+library(psych)
+library(ggdist)
+library(cowplot)
+library(gridExtra)
+library(leaps)
+library(caret)
+set.seed(777)
+```
+
+```{r}
+# read data cleaned by Arif
+hdb <- read_parquet("Final HDB price.parquet")
+
+hdb$date <- ymd(hdb$date)
+hdb$month <- month(hdb$date)
+hdb$year <- year(hdb$date)
+
+# remove rows with date for 2023
+hdb <- subset(hdb, !year(date) == 2023 & year(date) >= 2015)
+
+# obtain the median price per month-year
+aggregated <- aggregate(price_sqm ~ date, hdb, median)
+
+# clean header
+colnames(hdb) <- gsub(" ", "", colnames(hdb))
+colnames(hdb) <- gsub("-", "_", colnames(hdb))
+
+# Create a function to calculate the median from a string of the form "x TO y"
+get_median <- function(x) {
+  split_list <- strsplit(x, " TO ")[[1]]
+  int_list <- as.integer(split_list)
+  median_val <- median(int_list)
+  return(median_val)
+}
+
+# Apply the get_median function to the 'storey_range' column and assign the result to 'storey_median' column
+hdb$storey_median <- sapply(hdb$storey_range, get_median)
+
+# ln(floor_area_sqm)
+#hdb$ln_floor_area <- log(hdb$floor_area_sqm, base = exp(1))
+
+for (col in names(hdb)) {
+  # Check if column name starts with a number
+  if (grepl("^[0-9]", col)) {
+    # Add a character prefix to the column name
+    new_col <- paste0("y", col)
+    # Rename the column in the dataset
+    names(hdb)[names(hdb) == col] <- new_col
+  }
+}
+
+```
+
+```{r}
+
+# merge aggregated data into hdb main df
+hdb <- merge(hdb, aggregated, by = "date", all.x = TRUE, suffixes = c("", "_median"))
+
+# export as csv
+write.csv(hdb, file = "hdb_clean.csv", row.names = FALSE)
+```
+
+
+```{r fig.width=10}
+par(mfrow = c(1, 4))
+plot(hdb$price_adj_sqm, hdb$price_adj_sqm, xlab = "Home price/(CPI*sqm)", ylab = "Home price/(CPI*sqm)", main = "Home price/(CPI*sqm)", cex.lab = 1.5)
+plot(hdb$price_sqm, hdb$price_adj_sqm, xlab = "Home price/sqm", ylab = "Home price/(CPI*sqm)", main = "Price/sqm", cex.lab = 1.5)
+plot(hdb$price, hdb$price_adj_sqm, xlab = "Home Price", ylab = "Home price/(CPI*sqm)", main = "Home Price", cex.lab = 1.5)
+plot(hdb$price_adj, hdb$price_adj_sqm, xlab = "Home price/CPI", ylab = "Home price/(CPI*sqm)", main = "Home price/CPI", cex.lab = 1.5)
+
+```
+We could just use price per sqm since its trend is almost the same as price per sqm when taking inflation into account
+
+
+```{r}
+
+
+par(mar = c(5, 4, 4, 4) + 0.3)              # Additional space for second y-axis
+plot(hdb$date, hdb$CPI, pch = 16, col = 2, xlab = "Date", ylab = "CPI")              # Create first plot
+par(new = TRUE)                             # Add new plot
+plot(hdb$date, hdb$price_sqm_median, pch = 17, col = 3,              # Create second plot without axes
+     axes = FALSE, xlab = "Date", ylab = "CPI")
+axis(side = 4, at = pretty(range(hdb$price_sqm_median)))      # Add second axis
+mtext("price_sqm_median", side = 4, line = 3)             # Add second axis label
+legend("topleft", legend = c("CPI", "price_sqm_median"), col = c(2, 3), pch = c(16, 17))
+```
+
+Median housing price is growing faster than inflation from 2020 onward and converge by the end of 2022.
+Before 2020, housing price is almost same trend as inflation.
+It might be even more accurate if we don't consider CPI.
+
+
+
+```{r}
+# plot price_sqm by town
+ggplot(hdb, aes(x = reorder(factor(town), -price_adj_sqm), y = price_adj_sqm)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Boxplot of Price per sqm by Town", x= "Town")
+
+```
+
+Geospatial Choropleth map
+```{r fig.width=30 fig.height=10}
+library(ggspatial)
+# https://chenkianwee.gitbooks.io/generate-and-solar-analyse-urban-3d-model/content/step_by_step_manual.html
+
+# https://rstudio-pubs-static.s3.amazonaws.com/607946_52f049f868714d4a8251de1b56aca70d.html
+
+# https://rpubs.com/vinit_nair/605652
+
+# https://rpubs.com/tskam/Choropleth_Mapping
+
+# load geospatial shapefile
+#PAB_Data <- readOGR("MP14_PLNG_AREA_NO_SEA_PL.kml","MP14_PLNG_AREA_NO_SEA_PL",encoding="utf-8")
+
+shapefile <- st_read("MP14_PLNG_AREA_NO_SEA_PL.kml")
+
+aggregated_town <- aggregate(price_adj_sqm ~ town, hdb, median)
+
+# clean KALLANG into KALLANG/WHAMPOA
+shapefile$Name[shapefile$Name == "KALLANG"] <- "KALLANG/WHAMPOA"
+
+merged_data <- left_join(shapefile, aggregated_town, by = c("Name" = "town"))
+
+# export as csv to check data
+write.csv(merged_data, file = "choropleth_raw.csv", row.names = FALSE)
+
+ggplot() +
+  geom_sf(data = merged_data, aes(fill = price_adj_sqm)) +
+ scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Choropleth Map of Price Range") +
+  theme_minimal() #+
+  
+  #geom_sf_label(data = merged_data, aes(label = Name), size = 2)
+
+```
+```{r}
+#shapefile
+
+```
+
+
+
+```{r}
+# plot price_sqm by Flat Type
+ggplot(hdb, aes(x = reorder(factor(flat_type), price_sqm), y = price_sqm)) +
+  geom_boxplot() +
+   theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Boxplot of Price per sqm by Flat Type", x= "Flat Type")
+
+```
+5 room and executive flat is most cost effective
+
+```{r}
+# plot price_sqm by Flat Type
+ggplot(hdb, aes(x = reorder(factor(flat_model), -price_sqm), y = price_sqm)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Boxplot of Price per sqm by model", x= "model")
+
+```
+
+```{r}
+# plot price_sqm by Flat Type
+ggplot(hdb, aes(x = reorder(factor(storey_range), price_sqm), y = price_adj_sqm)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Boxplot of Price per sqm by storey range", x= "storey range")
+
+```
+
+
+Flats at higher storey yield higher price
+
+```{r}
+
+# plot proce per sqm by remaining lease
+
+ggplot(data = hdb, aes(y = price_sqm, x = remaining_lease)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) + theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Price per sqm by remaining lease", x= "reamining lease")
+```
+```{r}
+hdb_correlation <- hdb %>% select(-block, -street_name, -date, -lease_commence_date, -town, -storey_range, -price_sqm_median, -price, -price_adj, -price_sqm, -CPI, -flat_type, -flat_model, -floor_area_sqm, -remaining_lease, -year, -month)
+
+hdb_dataset_correlation <- hdb %>% select(floor_area_sqm, remaining_lease, year, month, price_adj_sqm)
+
+# -flat_model, -flat_type, 
+str(hdb_correlation)
+str(hdb_dataset_correlation)
+```
+
+```{r}
+str(hdb_dataset_correlation)
+```
+
+```{r}
+length(hdb_correlation)
+```
+
+```{r fig.width=15, fig.height=20, echo=FALSE}
+
+# create subplot
+par(mfrow=c(8,3 ))
+
+# loop through each column to plot histogram
+for (i in 2: length(hdb_correlation)){
+  plot(hdb_correlation[,i], hdb_correlation$price_adj_sqm, xlab = noquote(colnames(hdb_correlation))[i], main = "Scatterplot")
+}
+
+```
+
+
+
+```{r fig.width=15, fig.height=20, echo=FALSE}
+
+# create subplot
+par(mfrow=c(4,2 ))
+
+# loop through each column to plot histogram
+for (i in 1: length(hdb_dataset_correlation)){
+  plot(hdb_dataset_correlation[,i], hdb_dataset_correlation$price_adj_sqm, xlab = noquote(colnames(hdb_dataset_correlation))[i], main = "Scatterplot")
+}
+
+```
+
+
+```{r fig.width = =30, fig.height = 30}
+# Create a sample correlation matrix
+cor_matrix <- cor(hdb_correlation)
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method = "color")
+
+```
+```{r}
+
+# Create a sample correlation matrix
+cor_matrix1 <- cor(hdb_dataset_correlation)
+
+# Plot the correlation matrix
+corrplot(cor_matrix1, method = "color")
+```
+
+
+```{r fig.width=15, fig.height=15, echo=FALSE}
+
+
+hdb_histogram <- hdb %>% select(-date, -street_name, -price, -price_adj, -CPI, -price_sqm, price_sqm_median, -block, -lease_commence_date, - town , -flat_type, -flat_model, -storey_range, -price_sqm_median)
+str(hdb_histogram)
+```
+
+
+```{r}
+length(hdb_histogram)
+```
+
+```{r fig.width=15, fig.height=15, echo=FALSE}
+
+
+# create subplot
+par(mfrow=c(7,4))
+
+# loop through each column to plot histogram
+for (i in 1: length(hdb_histogram)){
+  hist(hdb_histogram[,i], xlab = noquote(colnames(hdb_histogram)[i]), main = "Histogram", col = 'turquoise')
+}
+```
+```{r}
+# plot co-relation pair plot
+corrplot(cor(hdb_histogram))
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+# Calculate correlation matrix
+cor_matrix <- cor(hdb_histogram)
+
+
+# Sort correlation values for 'Price_adj_sqm' in descending order and select top 10
+top_correlated <- sort(cor_matrix[,'price_adj_sqm'], decreasing = TRUE)[2:27]
+
+# Create a data frame with correlation values
+top_co <- data.frame(Feature = names(top_correlated), 'Correlation to Sales Price' = top_correlated)
+
+# Print the result
+#print(top_co)
+
+top_features <- names(top_correlated)[1:10]
+bottom_5features <- names(top_correlated)[24:26]
+
+selected <- c(top_features, bottom_5features, "price_adj", "month")
+selected
+```
+
+```{r}
+top_co
+```
+
+
+
+```{r fig.width=15, fig.height=15, echo=FALSE}
+
+# Set smaller figure margins
+par(mfrow=c(6,5), mar=c(2, 2, 1, 1))
+
+# Loop through each feature to see the relationship with the number of crimes
+for (i in 2:length(hdb_histogram)) {
+  plot(hdb_histogram[, i], hdb_histogram$price_adj_sqm,
+       #xlab = noquote(colnames(hdb_histogram))[i], ylab = 'Price/(CPI*sqm)',
+       main = paste(noquote(colnames(hdb_histogram))[i]))
+  abline(lm(hdb_histogram[, 1] ~ hdb_histogram[, i]), col = 'turquoise', lwd = 2)
+}
+```
+
+```{r}
+
+describe(hdb)
+```
+
+```{r fig.width=15, fig.height=15, echo=FALSE}
+# create subplot
+par(mfrow=c(7,4))
+
+# Iterate over each column
+for (col in names(hdb_histogram)) {
+  # Probability plot
+  qqnorm(hdb_histogram[[col]], main = paste("Probability Plot of", col))
+  qqline(hdb_histogram[[col]], col = "red")
+}
+```
+```{r fig.width=15, fig.height=15, echo=FALSE}
+# create subplot
+par(mfrow=c(7,4))
+
+for (col in names(hdb_histogram)) {
+  # Apply log transformation to the column
+  transformed_col <- log(hdb_histogram[[col]])
+  
+  # Probability plot
+  qqnorm(transformed_col, main = paste("Probability Plot of Log(", col, ")"))
+  qqline(transformed_col, col = "red")
+}
+```
+
+
+
+```{r}
+
+# add char names to selected
+selected <- c("town", "flat_type", "flat_model", "floor_area_sqm", "storey_median", selected)
+
+names_to_be_removed <- names(hdb[, -which(names(hdb) %in% selected)])
+
+
+hdb_select <- hdb %>% select(-date, -price_sqm, price_adj, -block, street_name, -lease_commence_date, -CPI, - price_sqm_median, -storey_range)
+
+hdb_select <- hdb_select[, -which(names(hdb_select) %in% names_to_be_removed)]
+
+str(hdb_select)
+
+```
+
+```{r}
+# https://towardsdatascience.com/selecting-the-best-predictors-for-linear-regression-in-r-f385bf3d93e9
+lm1 <- lm(price_adj_sqm~. ,data= hdb_select)
+summary(lm1)
+```
+
+
+```{r}
+
+alias(lm1)
+```
+
+```{r}
+#vif(lm1)
+```
+
+```{r}
+encoded_data <- model.matrix(~ . - 1, data = hdb_select)
+encoded_data <- as.data.frame(encoded_data)
+str(encoded_data)
+```
+
+
+```{r fig.width=15, fig.height=15, echo=FALSE}
+corrplot(cor(encoded_data))
+```
+```{r}
+encoded_data_lm <- encoded_data %>% select('townBUKIT MERAH', townQUEENSTOWN,  'townCENTRAL AREA', flat_modelDBSS, price_adj_sqm , storey_median, remaining_lease ,  y30_34Years, townWOODLANDS, townBISHAN, 'flat_type2 ROOM', 'flat_type3 ROOM', floor_area_sqm, 'townCHOA CHU KANG', 'flat_modelTYPE S1', 'flat_modelTYPE S2', 'townKALLANG/WHAMPOA', 'townCLEMENTI', 'townTOA PAYOH', 'y80_84Years')
+
+```
+
+```{r}
+
+# predictors dataframe
+#hdb_select_predictors <- encoded_data[,-1]
+
+# perform PCA using prcomp(), excluding response 'price_adj_sqm'
+#pca_hdb <- prcomp(hdb_select_predictors, scale = TRUE)
+
+# display summary
+#summary(pca_hdb)
+```
+```{r}
+# y variable removed
+#head(hdb_select_predictors)
+```
+
+```{r}
+# calculate eigenvalues
+#eigenvalues <- pca_hdb$sdev*pca_hdb$sdev
+#eigenvalues
+```
+```{r}
+#names(pca_hdb)
+```
+
+```{r}
+# print eigenvectors
+#eigenvectors <- pca_hdb$rotation # note that these values are scaled so the SS =1
+
+# print head
+#head(eigenvectors)
+```
+
+```{r}
+
+# calculate % eigenvalues
+#eigenvalues_percent <- eigenvalues*100/sum(eigenvalues)
+
+# create subplots
+#par(mfrow=c(1,2))
+
+# visualize in a scree plot % variance
+#qplot(c(1:82), eigenvalues_percent) + geom_line() + scale_x_continuous("Principal Component", breaks=c(1:82)) + ggtitle("Scree Plot using % variance by each component") + #ylab("Total variance explained by each principal component (%)") + geom_vline(xintercept = 5, col='red', lty=2) + theme(plot.title = element_text(hjust = 0.5))
+
+```
+```{r}
+# scree plot using variance
+#screeplot(pca_hdb, type = 'l', main = 'Scree Plot using variance')
+#abline(2,0, col = 'red', lty=3)
+```
+
+```{r }
+
+#create dataframe with PC1 ~ PC5 for linear regression modeling
+#hdb_new <- data.frame(cbind(hdb_select[,1], pca_hdb$x[,1:5]))
+
+# insert name from crime rate
+#colnames(hdb_new)[1] <- 'price_adj_sqm'
+
+# display new training dataset
+#head(hdb_new)
+```
+
+```{r}
+# fit model
+#hdb.fit <- lm(price_adj_sqm~., data = hdb_new)
+#summary(hdb.fit)
+
+```
+
+ "storey_median"   "remaining_lease" "y30_34Years"     "y80_84Years"     "year"           
+ [6] "y70_74Years"     "y65_69Years"     "y90Years&Over"   "senior_citizen"  "y85_89Years"    
+[11] "y20_24Years"     "adult"           "y0_4Years" 
+
+```{r}
+#model <- lm(price_adj_sqm ~ flat_type+ year + storey_median  + remaining_lease + y30_34Years  , data = hdb)
+#summary(model)
+```
+```{r}
+#vif(model)
+```
+
+```{r}
+# Calculate correlation matrix
+cor_matrix <- cor(encoded_data)
+
+
+# Sort correlation values for 'Price_adj_sqm' in descending order and select top 10
+top_correlated <- sort(cor_matrix[,'price_adj_sqm'], decreasing = TRUE)[2:27]
+
+# Create a data frame with correlation values
+top_co <- data.frame(Feature = names(top_correlated), 'Correlation to Sales Price' = top_correlated)
+top_co
+
+```
+
+
+```{r}
+model5 <- lm(price_adj_sqm~., data = encoded_data_lm)
+summary(model5)
+```
+```{r}
+vif(model5)
+```
+
+```{r}
+cooks <-cooks.distance(model5)
+which(cooks>1)
+```
+```{r}
+plot(model5)
+```
+
+
+```{r}
+
+
+# Split the data into train, test, and validation sets
+set.seed(42)
+
+# calculate total rows
+total_rows <- nrow(encoded_data_lm)
+
+
+
+
+# Separate the predictors (X) and the response (Y)
+predictors <- subset(encoded_data_lm, select = -c(price_adj_sqm))
+response<- subset(encoded_data_lm, select = c(price_adj_sqm))
+
+# Scale the predictors
+scaled_predictors <- scale(predictors)
+
+# Combine the scaled predictors and the response back into a data frame
+scaled_encoded_data_lm <- data.frame(scaled_predictors, response)
+
+
+
+
+
+# Sieve out training set at random
+sample_split1 <- sample(1:total_rows, size = round(0.7*total_rows), replace = FALSE)
+
+# create training dataset
+hdb_train <- scaled_encoded_data_lm[sample_split1,]
+
+# create validation dataset
+hdb_valid <- scaled_encoded_data_lm[-sample_split1,]
+total_valid_rows <- nrow(hdb_valid)
+sample_split2  <- sample(1:total_valid_rows, size = round(0.5*total_valid_rows), replace = FALSE)
+
+hdb_validation <- hdb_valid[sample_split2,]
+
+
+hdb_test <- hdb_valid[-sample_split2,]
+
+```
+```{r}
+print(dim(hdb_train))
+# export as csv
+write.csv(hdb_train, file = "hdb_train.csv", row.names = FALSE)
+
+
+print(dim(hdb_validation))
+write.csv(hdb_validation, file = "hdb_validation.csv", row.names = FALSE)
+
+print(dim(hdb_test))
+write.csv(hdb_test, file = "hdb_test.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+
+# Create the dummy regressor model
+model <- lm(price_adj_sqm ~ ., data = hdb_train)
+summary(model)
+
+```
+```{r}
+vif(model)
+```
+
+```{r}
+encoded_price <- encoded_data %>% select('townBUKIT MERAH', townQUEENSTOWN,  'townCENTRAL AREA', flat_modelDBSS, price , storey_median, remaining_lease ,  y30_34Years, townWOODLANDS, townBISHAN, 'flat_type3 ROOM', floor_area_sqm, 'townCHOA CHU KANG', 'flat_modelTYPE S1', 'flat_modelTYPE S2', 'townKALLANG/WHAMPOA', 'townCLEMENTI', 'townTOA PAYOH', 'y80_84Years', 'month')
+
+model_price <- lm(price~., data= encoded_price)
+summary(model_price)
+
+```
+```{r}
+vif(model_price)
+```
+
+
+```{r}
+encoded_price1 <- encoded_data %>% select('townBUKIT MERAH', townQUEENSTOWN,  'townCENTRAL AREA', flat_modelDBSS, price_sqm , storey_median, remaining_lease ,  y30_34Years, townWOODLANDS, townBISHAN, 'flat_type3 ROOM', floor_area_sqm, 'townCHOA CHU KANG', 'flat_modelTYPE S1', 'flat_modelTYPE S2', 'townKALLANG/WHAMPOA', 'townCLEMENTI', 'townTOA PAYOH', 'y80_84Years')
+
+model_price1 <- lm(price_sqm~., data= encoded_price1)
+summary(model_price1)
+
+```
+
+```{r}
+encoded_price3 <- encoded_data %>% select('townBUKIT MERAH', townQUEENSTOWN, flat_modelDBSS, price , storey_median, remaining_lease ,  y30_34Years, townWOODLANDS, townBISHAN, 'flat_type3 ROOM', floor_area_sqm, 'flat_modelTYPE S1', 'townKALLANG/WHAMPOA', 'y80_84Years')
+
+# Calculate correlation matrix
+cor_matrix <- cor(encoded_price3)
+
+
+# Sort correlation values for 'Price_adj_sqm' in descending order and select top 10
+top_correlated <- sort(cor_matrix[,'price'], decreasing = TRUE)[2:27]
+
+# Create a data frame with correlation values
+top_co <- data.frame(Feature = names(top_correlated), 'Correlation to Sales Price' = top_correlated)
+top_co
+
+
+```
+```{r}
+
+model_price5 <- lm(price~., data= encoded_price3)
+summary(model_price5)
+```
+```{r}
+
+encoded_price6 <- encoded_data %>% select('townBUKIT MERAH', townQUEENSTOWN, flat_modelDBSS, price_adj , storey_median, remaining_lease ,  y30_34Years, townWOODLANDS, townBISHAN, 'flat_type3 ROOM', floor_area_sqm, 'flat_modelTYPE S1', 'townKALLANG/WHAMPOA', 'y80_84Years')
+
+model_price5 <- lm(price_adj~., data= encoded_price6)
+summary(model_price5)
+```
