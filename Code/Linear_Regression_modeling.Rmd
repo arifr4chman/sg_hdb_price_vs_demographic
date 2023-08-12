@@ -1,0 +1,260 @@
+```{r}
+# install library packages
+library(arrow)
+library(lubridate)
+library(ggplot2)
+library(rgdal)
+library(sf)
+library(dplyr)
+library(corrplot)
+library(car)
+library(psych)
+library(ggdist)
+library(cowplot)
+library(gridExtra)
+library(leaps)
+library(caret)
+library(polycor)
+set.seed(777)
+```
+
+```{r}
+# read data cleaned by Arif
+hdb <- read_parquet("Final HDB price.parquet")
+
+hdb$date <- ymd(hdb$date)
+hdb$month <- month(hdb$date)
+hdb$year <- year(hdb$date)
+
+# remove rows with date for 2023
+hdb <- subset(hdb, !year(date) == 2023 & year(date) >= 2015)
+
+# obtain the median price per month-year
+aggregated <- aggregate(price ~ date, hdb, median)
+
+# clean header
+colnames(hdb) <- gsub(" ", "", colnames(hdb))
+colnames(hdb) <- gsub("-", "_", colnames(hdb))
+
+# Create a function to calculate the median from a string of the form "x TO y"
+get_median <- function(x) {
+  split_list <- strsplit(x, " TO ")[[1]]
+  int_list <- as.integer(split_list)
+  median_val <- median(int_list)
+  return(median_val)
+}
+
+# Apply the get_median function to the 'storey_range' column and assign the result to 'storey_median' column
+hdb$storey_median <- sapply(hdb$storey_range, get_median)
+
+# ln(floor_area_sqm)
+#hdb$ln_floor_area <- log(hdb$floor_area_sqm, base = exp(1))
+
+for (col in names(hdb)) {
+  # Check if column name starts with a number
+  if (grepl("^[0-9]", col)) {
+    # Add a character prefix to the column name
+    new_col <- paste0("y", col)
+    # Rename the column in the dataset
+    names(hdb)[names(hdb) == col] <- new_col
+  }
+}
+
+
+str(hdb)
+```
+
+
+```{r}
+# plot price_sqm by town
+ggplot(hdb, aes(x = reorder(factor(town), -price), y = price)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Boxplot of Price by Town", x= "Town")
+
+```
+
+
+Geospatial Choropleth map
+```{r fig.width=30 fig.height=10}
+library(ggspatial)
+# https://chenkianwee.gitbooks.io/generate-and-solar-analyse-urban-3d-model/content/step_by_step_manual.html
+
+# https://rstudio-pubs-static.s3.amazonaws.com/607946_52f049f868714d4a8251de1b56aca70d.html
+
+# https://rpubs.com/vinit_nair/605652
+
+# https://rpubs.com/tskam/Choropleth_Mapping
+
+# load geospatial shapefile
+#PAB_Data <- readOGR("MP14_PLNG_AREA_NO_SEA_PL.kml","MP14_PLNG_AREA_NO_SEA_PL",encoding="utf-8")
+
+shapefile <- st_read("MP14_PLNG_AREA_NO_SEA_PL.kml")
+
+aggregated_town <- aggregate(price_sqm ~ town, hdb, mean)
+
+# clean KALLANG into KALLANG/WHAMPOA
+shapefile$Name[shapefile$Name == "KALLANG"] <- "KALLANG/WHAMPOA"
+
+merged_data <- left_join(shapefile, aggregated_town, by = c("Name" = "town"))
+
+# export as csv to check data
+write.csv(aggregated_town, file = "choropleth_raw.csv", row.names = FALSE)
+
+ggplot() +
+  geom_sf(data = merged_data, aes(fill = price_sqm)) +
+ scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Choropleth Map of Price Range") +
+  theme_minimal() #+
+  
+  #geom_sf_label(data = merged_data, aes(label = Name), size = 2)
+
+```
+
+
+
+```{r}
+hdb_clean <- hdb %>% select(-date, -price_sqm, -price_adj, -price_adj_sqm, -block, -CPI, -lease_commence_date, -storey_range, -street_name, -storey_range)
+```
+
+
+
+
+
+```{r}
+# plot price_sqm by Flat Type
+ggplot(hdb, aes(x = reorder(factor(storey_range), price), y = price)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Boxplot of Price by storey range", x= "storey range")
+```
+```{r}
+
+hdb_histogram <- hdb_clean %>% select(- town , -flat_type, -flat_model)
+str(hdb_histogram)
+```
+```{r}
+
+# Calculate correlation matrix
+cor_matrix <- cor(hdb_histogram)
+
+
+# Sort correlation values for 'Price_adj_sqm' in descending order and select top 10
+top_correlated <- sort(cor_matrix[,'price'], decreasing = TRUE)[2:27]
+
+# Create a data frame with correlation values
+top_co <- data.frame(Feature = names(top_correlated), 'Correlation to Housing Price' = top_correlated)
+
+top_co
+```
+
+```{r}
+corrplot(cor(hdb_histogram))
+```
+
+
+```{r}
+
+
+hdb_correlation <- hdb_clean %>% select( town , flat_type, flat_model, price)
+
+encoded_data_c <- model.matrix(~ . - 1, data = hdb_correlation)
+encoded_data_c <- as.data.frame(encoded_data_c)
+str(encoded_data_c)
+
+```
+
+
+```{r fig.width=15, fig.height=15, echo=FALSE}
+corrplot(cor(encoded_data_c))
+```
+
+
+```{r}
+
+
+
+
+encoded_data <- model.matrix(~ . - 1, data = hdb_clean)
+encoded_data <- as.data.frame(encoded_data)
+str(encoded_data)
+
+```
+
+
+
+```{r}
+
+# Calculate correlation matrix
+cor_matrix_hdb <- cor(encoded_data)
+
+
+# Sort correlation values for 'Price_adj_sqm' in descending order and select top 10
+top <- sort(cor_matrix_hdb[,'price'], decreasing = TRUE)[2:80]
+
+# Create a data frame with correlation values
+top_hdb <- data.frame(Feature = names(top), 'Correlation to Housing Price' = top)
+
+top_hdb
+```
+
+
+```{r}
+data_final <- encoded_data %>% select('townBUKIT MERAH', townQUEENSTOWN,  'townCENTRAL AREA', flat_modelDBSS, price , storey_median, remaining_lease ,  y30_34Years, townWOODLANDS, townBISHAN, 'flat_type3 ROOM', floor_area_sqm, 'townCHOA CHU KANG', 'flat_modelTYPE S1', 'flat_modelTYPE S2', 'townKALLANG/WHAMPOA', 'townCLEMENTI', 'townTOA PAYOH', 'y80_84Years', 'month')
+
+model7 <- lm(price~., data = data_final)
+summary(model7)
+```
+```{r}
+vif(model7)
+```
+
+```{r}
+
+
+# Split the data into train, test, and validation sets
+set.seed(42)
+
+# calculate total rows
+total_rows <- nrow(data_final)
+
+
+# Sieve out training set at random
+sample_split1 <- sample(1:total_rows, size = round(0.7*total_rows), replace = FALSE)
+
+# create training dataset
+hdb_train <- data_final[sample_split1,]
+
+# create validation dataset
+hdb_valid <- data_final[-sample_split1,]
+total_valid_rows <- nrow(hdb_valid)
+sample_split2  <- sample(1:total_valid_rows, size = round(0.5*total_valid_rows), replace = FALSE)
+
+hdb_validation <- hdb_valid[sample_split2,]
+
+
+hdb_test <- hdb_valid[-sample_split2,]
+
+```
+```{r}
+print(dim(hdb_train))
+# export as csv
+write.csv(hdb_train, file = "hdb_train.csv", row.names = FALSE)
+
+
+print(dim(hdb_validation))
+write.csv(hdb_validation, file = "hdb_validation.csv", row.names = FALSE)
+
+print(dim(hdb_test))
+write.csv(hdb_test, file = "hdb_test.csv", row.names = FALSE)
+```
+```{r}
+model8 <- lm(price~., data = hdb_train)
+summary(model8)
+```
+```{r}
+cooks <-cooks.distance(model8)
+which(cooks>1)
+```
