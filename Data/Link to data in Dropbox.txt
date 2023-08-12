@@ -1,0 +1,5 @@
+https://www.dropbox.com/sh/ga76qmvx2ut37cs/AACCYX3OyJYWwP8SA_vXQP8Aa?dl=0
+
+Note: in the drop box you'll find these 4 files:
+1. Final HDB price2.csv - is compilation that we merged all data
+2. hdb_train.csv, hdb_test.csv, hdb_validation.csv - are HDB data split into Train, Validation and Test
